@@ -1,5 +1,5 @@
 use crate::*;
-use near_sdk::{ext_contract, Gas, PromiseOrValue, Promise};
+use near_sdk::{ext_contract, Gas, PromiseOrValue, Promise, env, PromiseResult, log};
 
 const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas(10_000_000_000_000);
 const GAS_FOR_NFT_ON_TRANSFER: Gas = Gas(25_000_000_000_000);
@@ -66,9 +66,18 @@ impl NonFungibleTokenCore for Contract {
         token_id: TokenId,
         memo: Option<String>,
     ) {
-        /*
-            FILL THIS IN
-        */
+        //assert that the user attached exactly 1 yoctoNEAR. This is for security and so that the user will be redirected to the NEAR wallet.
+        assert_one_yocto();
+        //get the sender to transfer the token from the sender to the receiver
+        let sender_id = env::predecessor_account_id();
+
+        //call the internal transfer method
+        self.internal_transfer(
+            &sender_id,
+            &receiver_id,
+            &token_id,
+            memo,
+        );
     }
 
     //implementation of the transfer call method. This will transfer the NFT and call a method on the receiver_id contract
@@ -80,10 +89,41 @@ impl NonFungibleTokenCore for Contract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<bool> {
-        /*
-            FILL THIS IN
-        */
-        todo!(); //remove once code is filled in.
+
+        //assert that the user attached exactly 1 yocto for security reasons.
+        assert_one_yocto();
+        //get the sender ID
+        let sender_id = env::predecessor_account_id();
+
+        //transfer the token and get the previous token object
+        let previous_token = self.internal_transfer(
+            &sender_id,
+            &receiver_id,
+            &token_id,
+            memo,
+        );
+
+        // Initiating receiver's call and the callback
+        // Defaulting GAS weight to 1, no attached deposit, and static GAS equal to the GAS for nft on transfer.
+        ext_non_fungible_token_receiver::ext(receiver_id.clone())
+            .with_static_gas(GAS_FOR_NFT_ON_TRANSFER)
+            .nft_on_transfer(
+                sender_id,
+                previous_token.owner_id.clone(),
+                token_id.clone(),
+                msg
+            )
+        // We then resolve the promise and call nft_resolve_transfer on our own contract
+        .then(
+            // Defaulting GAS weight to 1, no attached deposit, and static GAS equal to the GAS for resolve transfer
+            Self::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_RESOLVE_TRANSFER)
+                .nft_resolve_transfer(
+                    previous_token.owner_id,
+                    receiver_id,
+                    token_id,
+                )
+        ).into()
     }
 
     //get the information for a specific token ID
@@ -115,9 +155,48 @@ impl NonFungibleTokenResolver for Contract {
         receiver_id: AccountId,
         token_id: TokenId,
     ) -> bool {
-        /*
-            FILL THIS IN
-        */
-        todo!(); //remove once code is filled in.
+        // Whether receiver wants to return token back to the sender, based on `nft_on_transfer`
+        // call result.
+        if let PromiseResult::Successful(value) = env::promise_result(0) {
+            //As per the standard, the nft_on_transfer should return whether we should return the token to it's owner or not
+            if let Ok(return_token) = near_sdk::serde_json::from_slice::<bool>(&value) {
+                //if we need don't need to return the token, we simply return true meaning everything went fine
+                if !return_token {
+                    /*
+                        since we've already transferred the token and nft_on_transfer returned false, we don't have to
+                        revert the original transfer and thus we can just return true since nothing went wrong.
+                    */
+                    return true;
+                }
+            }
+        }
+
+        //get the token object if there is some token object
+        let mut token = if let Some(token) = self.tokens_by_id.get(&token_id) {
+            if token.owner_id != receiver_id {
+                // The token is not owner by the receiver anymore. Can't return it.
+                return true;
+            }
+            token
+        //if there isn't a token object, it was burned and so we return true
+        } else {
+            return true;
+        };
+
+        //if at the end, we haven't returned true, that means that we should return the token to it's original owner
+        log!("Return {} from @{} to @{}", token_id, receiver_id, owner_id);
+
+        //we remove the token from the receiver
+        self.internal_remove_token_from_owner(&receiver_id, &token_id);
+        //we add the token to the original owner
+        self.internal_add_token_to_owner(&owner_id, &token_id);
+
+        //we change the token struct's owner to be the original owner
+        token.owner_id = owner_id;
+        //we inset the token back into the tokens_by_id collection
+        self.tokens_by_id.insert(&token_id, &token);
+
+        //return false
+        false
     }
 }
