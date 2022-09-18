@@ -6,11 +6,13 @@ use crate::internal::*;
 pub use crate::metadata::*;
 pub use crate::mint::*;
 pub use crate::nft_core::*;
+pub use crate::enumerable::*;
 
 mod internal;
 mod metadata;
 mod mint;
 mod nft_core;
+mod enumerable;
 
 // Helper structure for keys of the persistent collections.
 #[derive(BorshSerialize)]
